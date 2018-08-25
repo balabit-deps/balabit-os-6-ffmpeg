@@ -306,6 +306,8 @@ int ff_mjpeg_decode_sof(MJpegDecodeContext *s)
     av_log(s->avctx, AV_LOG_DEBUG, "sof0: picture: %dx%d\n", width, height);
     if (av_image_check_size(width, height, 0, s->avctx))
         return AVERROR_INVALIDDATA;
+    if (s->buf_size && (width + 7) / 8 * ((height + 7) / 8) > s->buf_size * 4LL)
+        return AVERROR_INVALIDDATA;
 
     nb_components = get_bits(&s->gb, 8);
     if (nb_components <= 0 ||
@@ -590,6 +592,10 @@ unk_pixfmt:
     }
     if ((AV_RB32(s->upscale_h) || AV_RB32(s->upscale_v)) && s->avctx->lowres) {
         av_log(s->avctx, AV_LOG_ERROR, "lowres not supported for weird subsampling\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if ((AV_RB32(s->upscale_h) || AV_RB32(s->upscale_v)) && s->progressive && s->avctx->pix_fmt == AV_PIX_FMT_GBRP) {
+        avpriv_report_missing_feature(s->avctx, "progressive for weird subsampling");
         return AVERROR_PATCHWELCOME;
     }
     if (s->ls) {
@@ -977,6 +983,11 @@ static int ljpeg_decode_rgb_scan(MJpegDecodeContext *s, int nb_components, int p
         for (mb_x = 0; mb_x < s->mb_width; mb_x++) {
             int modified_predictor = predictor;
 
+            if (get_bits_left(&s->gb) < 1) {
+                av_log(s->avctx, AV_LOG_ERROR, "bitstream end in rgb_scan\n");
+                return AVERROR_INVALIDDATA;
+            }
+
             if (s->restart_interval && !s->restart_count){
                 s->restart_count = s->restart_interval;
                 resync_mb_x = mb_x;
@@ -1000,7 +1011,7 @@ static int ljpeg_decode_rgb_scan(MJpegDecodeContext *s, int nb_components, int p
                     return -1;
 
                 left[i] = buffer[mb_x][i] =
-                    mask & (pred + (dc * (1 << point_transform)));
+                    mask & (pred + (unsigned)(dc * (1 << point_transform)));
             }
 
             if (s->restart_interval && !--s->restart_count) {
@@ -2043,6 +2054,8 @@ int ff_mjpeg_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     int i, index;
     int ret = 0;
     int is16bit;
+
+    s->buf_size = buf_size;
 
     av_dict_free(&s->exif_metadata);
     av_freep(&s->stereo3d);
