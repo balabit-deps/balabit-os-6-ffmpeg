@@ -1,3 +1,11 @@
+ffmpeg (7:2.8.17-0ubuntu0.1) xenial-security; urgency=medium
+
+  * SECURITY UPDATE: New upstream bugfix release.
+    - Fixes CVE-2018-15822, CVE-2019-11338, CVE-2019-12730,
+      CVE-2019-17542 and CVE-2020-13904.
+
+ -- Eduardo Barretto <eduardo.barretto@canonical.com>  Wed, 15 Jul 2020 10:53:56 -0300
+
 ffmpeg (7:2.8.15-0ubuntu0.16.04.1) xenial-security; urgency=medium
 
   * SECURITY UPDATE: New upstream bugfix release.
