@@ -839,6 +839,7 @@ static int mov_read_adrm(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     sha = av_sha_alloc();
     if (!sha)
         return AVERROR(ENOMEM);
+    av_free(c->aes_decrypt);
     c->aes_decrypt = av_aes_alloc();
     if (!c->aes_decrypt) {
         ret = AVERROR(ENOMEM);
@@ -990,6 +991,9 @@ static int mov_read_moov(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
 static int mov_read_moof(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 {
+    // Set by mov_read_tfhd(). mov_read_trun() will reject files missing tfhd.
+    c->fragment.found_tfhd = 0;
+
     if (!c->has_looked_for_mfra && c->use_mfra_for > 0) {
         c->has_looked_for_mfra = 1;
         if (pb->seekable) {
@@ -2413,6 +2417,10 @@ static int mov_read_stsz(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
     for (i = 0; i < entries && !pb->eof_reached; i++) {
         sc->sample_sizes[i] = get_bits_long(&gb, field_size);
+        if (sc->sample_sizes[i] < 0) {
+            av_log(c->fc, AV_LOG_ERROR, "Invalid sample size %d\n", sc->sample_sizes[i]);
+            return AVERROR_INVALIDDATA;
+        }
         sc->data_size += sc->sample_sizes[i];
     }
 
@@ -3019,7 +3027,7 @@ static int mov_read_trak(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
     st = avformat_new_stream(c->fc, NULL);
     if (!st) return AVERROR(ENOMEM);
-    st->id = c->fc->nb_streams;
+    st->id = -1;
     sc = av_mallocz(sizeof(MOVStreamContext));
     if (!sc) return AVERROR(ENOMEM);
 
@@ -3265,6 +3273,11 @@ static int mov_read_tkhd(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     st = c->fc->streams[c->fc->nb_streams-1];
     sc = st->priv_data;
 
+    // Each stream (trak) should have exactly 1 tkhd. This catches bad files and
+    // avoids corrupting AVStreams mapped to an earlier tkhd.
+    if (st->id != -1)
+        return AVERROR_INVALIDDATA;
+
     version = avio_r8(pb);
     flags = avio_rb24(pb);
     st->disposition |= (flags & MOV_TKHD_FLAG_ENABLED) ? AV_DISPOSITION_DEFAULT : 0;
@@ -3377,6 +3390,7 @@ static int mov_read_tfhd(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         av_log(c->fc, AV_LOG_ERROR, "could not find corresponding trex\n");
         return AVERROR_INVALIDDATA;
     }
+    c->fragment.found_tfhd = 1;
 
     frag->base_data_offset = flags & MOV_TFHD_BASE_DATA_OFFSET ?
                              avio_rb64(pb) : flags & MOV_TFHD_DEFAULT_BASE_IS_MOOF ?
@@ -3494,6 +3508,11 @@ static int mov_read_trun(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     int data_offset = 0;
     unsigned entries, first_sample_flags = frag->flags;
     int flags, distance, i, found_keyframe = 0, err;
+
+    if (!frag->found_tfhd) {
+        av_log(c->fc, AV_LOG_ERROR, "trun track id unknown, no tfhd was found\n");
+        return AVERROR_INVALIDDATA;
+    }
 
     for (i = 0; i < c->fc->nb_streams; i++) {
         if (c->fc->streams[i]->id == frag->track_id) {
@@ -4357,10 +4376,9 @@ static int mov_read_close(AVFormatContext *s)
         av_freep(&sc->display_matrix);
     }
 
-    if (mov->dv_demux) {
-        avformat_free_context(mov->dv_fctx);
-        mov->dv_fctx = NULL;
-    }
+    av_freep(&mov->dv_demux);
+    avformat_free_context(mov->dv_fctx);
+    mov->dv_fctx = NULL;
 
     av_freep(&mov->trex_data);
     av_freep(&mov->bitrates);
@@ -4801,6 +4819,19 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
             sc->current_sample -= should_retry(sc->pb, ret);
             return ret;
         }
+#if CONFIG_DV_DEMUXER
+        if (mov->dv_demux && sc->dv_audio_container) {
+            AVBufferRef *buf = pkt->buf;
+            ret = avpriv_dv_produce_packet(mov->dv_demux, pkt, pkt->data, pkt->size, pkt->pos);
+            pkt->buf = buf;
+            av_packet_unref(pkt);
+            if (ret < 0)
+                return ret;
+            ret = avpriv_dv_get_packet(mov->dv_demux, pkt);
+            if (ret < 0)
+                return ret;
+        }
+#endif
         if (sc->has_palette) {
             uint8_t *pal;
 
@@ -4812,16 +4843,6 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
                 sc->has_palette = 0;
             }
         }
-#if CONFIG_DV_DEMUXER
-        if (mov->dv_demux && sc->dv_audio_container) {
-            avpriv_dv_produce_packet(mov->dv_demux, pkt, pkt->data, pkt->size, pkt->pos);
-            av_freep(&pkt->data);
-            pkt->size = 0;
-            ret = avpriv_dv_get_packet(mov->dv_demux, pkt);
-            if (ret < 0)
-                return ret;
-        }
-#endif
     }
 
     pkt->stream_index = sc->ffindex;

@@ -1114,7 +1114,7 @@ static void compute_pkt_fields(AVFormatContext *s, AVStream *st,
 
             /* This is tricky: the dts must be incremented by the duration
              * of the frame we are displaying, i.e. the last I- or P-frame. */
-            if (st->last_IP_duration == 0)
+            if (st->last_IP_duration == 0 && (uint64_t)pkt->duration <= INT32_MAX)
                 st->last_IP_duration = pkt->duration;
             if (pkt->dts != AV_NOPTS_VALUE)
                 st->cur_dts = pkt->dts + st->last_IP_duration;
@@ -1126,7 +1126,8 @@ static void compute_pkt_fields(AVFormatContext *s, AVStream *st,
                 next_pts != AV_NOPTS_VALUE)
                 pkt->pts = next_dts;
 
-            st->last_IP_duration = pkt->duration;
+            if ((uint64_t)pkt->duration <= INT32_MAX)
+                st->last_IP_duration = pkt->duration;
             st->last_IP_pts      = pkt->pts;
             /* Cannot compute PTS if not present (we can compute it only
              * by knowing the future. */
@@ -1795,6 +1796,8 @@ void ff_configure_buffers_for_index(AVFormatContext *s, int64_t time_tolerance)
     //We could use URLProtocol flags here but as many user applications do not use URLProtocols this would be unreliable
     const char *proto = avio_find_protocol_name(s->filename);
 
+    av_assert0(time_tolerance >= 0);
+
     if (!proto) {
         av_log(s, AV_LOG_INFO,
                "Protocol name not provided, cannot determine if input is local or "
@@ -1822,7 +1825,7 @@ void ff_configure_buffers_for_index(AVFormatContext *s, int64_t time_tolerance)
                 for (; i2 < st2->nb_index_entries; i2++) {
                     AVIndexEntry *e2 = &st2->index_entries[i2];
                     int64_t e2_pts = av_rescale_q(e2->timestamp, st2->time_base, AV_TIME_BASE_Q);
-                    if (e2_pts - e1_pts < time_tolerance)
+                    if (e2_pts < e1_pts || e2_pts - (uint64_t)e1_pts < time_tolerance)
                         continue;
                     pos_delta = FFMAX(pos_delta, e1->pos - e2->pos);
                     break;
@@ -2443,7 +2446,7 @@ static void estimate_timings_from_bit_rate(AVFormatContext *ic)
                 st      = ic->streams[i];
                 if (   st->time_base.num <= INT64_MAX / ic->bit_rate
                     && st->duration == AV_NOPTS_VALUE) {
-                    duration = av_rescale(8 * filesize, st->time_base.den,
+                    duration = av_rescale(filesize, 8LL * st->time_base.den,
                                           ic->bit_rate *
                                           (int64_t) st->time_base.num);
                     st->duration = duration;
@@ -3001,8 +3004,10 @@ int ff_rfps_add_frame(AVFormatContext *ic, AVStream *st, int64_t ts)
                 }
             }
         }
-        st->info->duration_count++;
-        st->info->rfps_duration_sum += duration;
+        if (st->info->rfps_duration_sum <= INT64_MAX - duration) {
+            st->info->duration_count++;
+            st->info->rfps_duration_sum += duration;
+        }
 
         if (st->info->duration_count % 10 == 0) {
             int n = st->info->duration_count;
@@ -3326,7 +3331,7 @@ int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
              * sequence, we treat it as a discontinuity. */
             if (st->info->fps_last_dts != AV_NOPTS_VALUE &&
                 st->info->fps_last_dts_idx > st->info->fps_first_dts_idx &&
-                (pkt->dts - st->info->fps_last_dts) / 1000 >
+                (pkt->dts - (uint64_t)st->info->fps_last_dts) / 1000 >
                 (st->info->fps_last_dts     - (uint64_t)st->info->fps_first_dts) /
                 (st->info->fps_last_dts_idx - st->info->fps_first_dts_idx)) {
                 av_log(ic, AV_LOG_WARNING,
